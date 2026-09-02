@@ -95,6 +95,17 @@
   .join-code-input{text-transform:uppercase; letter-spacing:3px; text-align:center; font-family:'Fraunces', serif; font-size:1.1rem;}
   .or-sep{display:flex; align-items:center; gap:10px; color:var(--ink-soft); font-size:0.78rem; margin:2px 0;}
   .or-sep::before, .or-sep::after{content:""; flex:1; height:1px; background:var(--border);}
+
+  .install-banner{
+    display:none;
+    align-items:center; justify-content:space-between; gap:10px;
+    margin:0 20px 10px; padding:12px 14px;
+    background:var(--primary); color:#fff;
+    border-radius:14px; font-size:0.85rem; font-weight:600;
+  }
+  .install-banner button{
+    background:#fff; color:var(--primary); padding:8px 14px; font-size:0.82rem; flex-shrink:0;
+  }
 </style>
 </head>
 <body>
@@ -109,6 +120,10 @@
     <button class="theme-toggle" id="themeToggle" aria-label="Cambiar tema"></button>
   </div>
   <div id="codeBar"></div>
+  <div class="install-banner" id="installBanner">
+    <span>Instala Wishy como app</span>
+    <button id="installBtn">Instalar</button>
+  </div>
   <div class="content" id="app"></div>
   <div class="bottom-nav" id="bottomNav" style="display:none;">
     <button class="nav-btn" data-tab="amigos">
