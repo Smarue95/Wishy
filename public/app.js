@@ -108,6 +108,7 @@ let eventCode = null;
 let state = {
   eventName: '', currency: 'COP', minAmount: '', maxAmount: '',
   participants: [], assignments: null, drawnAt: null,
+  organizerPin: null,
   sweet: { startDate: '', durationDays: '', intervalDays: '' }
 };
 let notifPref = { enabled: false, lastNotified: '' };
@@ -115,6 +116,18 @@ let revealedFor = null;
 let loaded = false;
 let activeTab = 'amigos';
 let sweetIdeaIndex = 0;
+let organizerUnlocked = false;
+let editingId = null;
+
+function checkOrganizerAccess() {
+  if (!state.organizerPin) return true;
+  if (organizerUnlocked) return true;
+  const attempt = prompt('Ingresa el PIN del organizador:');
+  if (attempt === null) return false;
+  if (attempt === state.organizerPin) { organizerUnlocked = true; return true; }
+  alert('PIN incorrecto.');
+  return false;
+}
 
 const SWEET_IDEAS = [
   'Deja un dulce en su puesto o casillero sin dejar rastro.',
@@ -201,6 +214,7 @@ async function joinEvent(code) {
   if (!code) return;
   eventCode = code;
   localStorage.setItem(CODE_KEY, code);
+  organizerUnlocked = false;
   await loadEventData();
   renderCodeBar();
   document.getElementById('bottomNav').style.display = 'flex';
@@ -266,13 +280,39 @@ async function saveState() {
   } catch (e) { console.error('Error guardando', e); }
 }
 
+function looksLikeUrl(text) {
+  const t = text.trim();
+  if (/\s/.test(t)) return false;
+  return /^(https?:\/\/)?[\w-]+(\.[\w-]+)+(\/\S*)?$/i.test(t);
+}
+function normalizeGiftNote(raw) {
+  const t = (raw || '').trim();
+  if (!t) return '';
+  if (/^https?:\/\//i.test(t)) return t;
+  if (looksLikeUrl(t)) return 'https://' + t;
+  return t; // texto libre: se guarda tal cual, sin convertirlo en link
+}
+function isRealLink(text) {
+  return !!text && /^https?:\/\//i.test(text);
+}
+
 function addParticipant(name, link) {
   name = (name || '').trim();
   if (!name) return;
-  link = (link || '').trim();
-  if (link && !/^https?:\/\//i.test(link)) link = 'https://' + link;
-  state.participants.push({ id: uid(), name, link });
+  const note = normalizeGiftNote(link);
+  state.participants.push({ id: uid(), name, link: note });
   state.assignments = null; state.drawnAt = null;
+  saveState(); render();
+}
+function editParticipant(id, name, link) {
+  name = (name || '').trim();
+  if (!name) return;
+  const note = normalizeGiftNote(link);
+  const p = state.participants.find(p => p.id === id);
+  if (!p) return;
+  p.name = name;
+  p.link = note;
+  editingId = null;
   saveState(); render();
 }
 function removeParticipant(id) {
@@ -344,6 +384,25 @@ document.getElementById('bottomNav').addEventListener('click', (e) => {
 });
 
 function renderAmigos(app) {
+  if (state.organizerPin && !organizerUnlocked) {
+    app.innerHTML = `
+      <h1 class="headline">Sección protegida</h1>
+      <p class="lede">Solo el organizador puede ver y editar la lista. Ingresa el PIN para continuar.</p>
+      <div class="field">
+        <label for="organizerPinInput">PIN del organizador</label>
+        <input type="text" id="organizerPinInput" placeholder="••••" inputmode="numeric">
+      </div>
+      <button class="btn-primary" id="unlockBtn">Desbloquear</button>
+    `;
+    const pinInput = document.getElementById('organizerPinInput');
+    document.getElementById('unlockBtn').addEventListener('click', () => {
+      if (pinInput.value === state.organizerPin) { organizerUnlocked = true; render(); }
+      else alert('PIN incorrecto.');
+    });
+    pinInput.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('unlockBtn').click(); });
+    return;
+  }
+
   app.innerHTML = `
     <h1 class="headline">Arma el grupo</h1>
     <p class="lede">Agrega a los participantes, define el monto y cuando estén todos, ve a "Sorteo".</p>
@@ -369,8 +428,24 @@ function renderAmigos(app) {
         </div>
       </div>
     </div>
+
+    <div class="card">
+      <label>Proteger la lista con un PIN</label>
+      ${state.organizerPin
+        ? `<p class="note" style="margin-top:0;">Protección activada.</p>
+           <button class="btn-secondary" id="changePinBtn">Cambiar o quitar PIN</button>`
+        : `<div class="row">
+             <div class="field" style="margin-bottom:0;">
+               <input type="text" id="newOrgPin" placeholder="Crea un PIN, ej. 4321" inputmode="numeric">
+             </div>
+             <button class="btn-add" id="setPinBtn">Activar</button>
+           </div>
+           <p class="note">Sin esto, cualquiera con el código puede editar la lista o rehacer el sorteo.</p>`
+      }
+    </div>
+
     <h1 class="headline" style="font-size:1.15rem;">Participantes</h1>
-    <p class="lede" style="margin-bottom:14px;">El link de regalo es opcional: wishlist, tienda o producto puntual.</p>
+    <p class="lede" style="margin-bottom:14px;">En "regalo" puedes poner un link, o algo puntual como talla, color o una idea — no tiene que ser una URL.</p>
     <div class="add-row">
       <div class="field">
         <label for="newName">Nombre</label>
@@ -379,18 +454,33 @@ function renderAmigos(app) {
       <button class="btn-add" id="addBtn">+</button>
     </div>
     <div class="field" style="margin-top:-10px;">
-      <input type="text" id="newLink" placeholder="Link de regalo (opcional)">
+      <input type="text" id="newLink" placeholder="Link o idea de regalo (opcional)">
     </div>
     ${state.participants.length === 0
       ? '<p class="empty">Aún no hay participantes.</p>'
       : `<ul class="participant-list">
-          ${state.participants.map(p => `
+          ${state.participants.map(p => editingId === p.id ? `
+            <li style="flex-direction:column; align-items:stretch; gap:8px;">
+              <input type="text" class="edit-name" data-id="${p.id}" value="${escapeAttr(p.name)}" placeholder="Nombre">
+              <input type="text" class="edit-link" data-id="${p.id}" value="${escapeAttr(p.link)}" placeholder="Link o idea de regalo">
+              <div class="row">
+                <button class="btn-add save-edit" data-id="${p.id}">Guardar</button>
+                <button class="btn-secondary cancel-edit">Cancelar</button>
+              </div>
+            </li>
+          ` : `
             <li>
               <div>
                 <div class="p-name">${escapeHtml(p.name)}</div>
-                ${p.link ? `<a class="p-link" href="${escapeAttr(p.link)}" target="_blank" rel="noopener">${escapeHtml(p.link)}</a>` : ''}
+                ${p.link ? (isRealLink(p.link)
+                    ? `<a class="p-link" href="${escapeAttr(p.link)}" target="_blank" rel="noopener">${escapeHtml(p.link)}</a>`
+                    : `<div class="note" style="margin-top:2px;">${escapeHtml(p.link)}</div>`)
+                  : ''}
               </div>
-              <button class="p-remove" data-id="${p.id}" aria-label="Quitar">✕</button>
+              <div style="display:flex; gap:4px;">
+                <button class="p-remove edit-btn" data-id="${p.id}" aria-label="Editar" title="Editar">✎</button>
+                <button class="p-remove" data-id="${p.id}" aria-label="Quitar">✕</button>
+              </div>
             </li>`).join('')}
         </ul>`
     }
@@ -400,6 +490,27 @@ function renderAmigos(app) {
   document.getElementById('minAmount').addEventListener('input', e => { state.minAmount = e.target.value; saveState(); });
   document.getElementById('maxAmount').addEventListener('input', e => { state.maxAmount = e.target.value; saveState(); });
   document.getElementById('currency').addEventListener('change', e => { state.currency = e.target.value; saveState(); });
+
+  const setPinBtn = document.getElementById('setPinBtn');
+  if (setPinBtn) {
+    setPinBtn.addEventListener('click', () => {
+      const v = document.getElementById('newOrgPin').value.trim();
+      if (!v) return;
+      state.organizerPin = v;
+      organizerUnlocked = true;
+      saveState(); render();
+    });
+  }
+  const changePinBtn = document.getElementById('changePinBtn');
+  if (changePinBtn) {
+    changePinBtn.addEventListener('click', () => {
+      const v = prompt('Escribe el nuevo PIN (deja vacío para quitar la protección):', '');
+      if (v === null) return;
+      state.organizerPin = v.trim() ? v.trim() : null;
+      saveState(); render();
+    });
+  }
+
   const nameInput = document.getElementById('newName');
   const linkInput = document.getElementById('newLink');
   document.getElementById('addBtn').addEventListener('click', () => addParticipant(nameInput.value, linkInput.value));
@@ -408,8 +519,22 @@ function renderAmigos(app) {
       if (e.key === 'Enter') { e.preventDefault(); addParticipant(nameInput.value, linkInput.value); }
     });
   });
-  document.querySelectorAll('.p-remove').forEach(btn => {
+  document.querySelectorAll('.p-remove[aria-label="Quitar"]').forEach(btn => {
     btn.addEventListener('click', () => removeParticipant(btn.dataset.id));
+  });
+  document.querySelectorAll('.edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => { editingId = btn.dataset.id; render(); });
+  });
+  document.querySelectorAll('.cancel-edit').forEach(btn => {
+    btn.addEventListener('click', () => { editingId = null; render(); });
+  });
+  document.querySelectorAll('.save-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.id;
+      const nameVal = document.querySelector(`.edit-name[data-id="${id}"]`).value;
+      const linkVal = document.querySelector(`.edit-link[data-id="${id}"]`).value;
+      editParticipant(id, nameVal, linkVal);
+    });
   });
 }
 
@@ -445,8 +570,11 @@ function renderAngelito(app) {
       <button class="btn-ghost" id="resetDrawBtn">Repetir el sorteo</button>
     </div>
   `;
-  document.getElementById('editListBtn').addEventListener('click', editList);
+  document.getElementById('editListBtn').addEventListener('click', () => {
+    if (checkOrganizerAccess()) editList();
+  });
   document.getElementById('resetDrawBtn').addEventListener('click', () => {
+    if (!checkOrganizerAccess()) return;
     if (confirm('Esto borra el sorteo actual para todos. ¿Continuar?')) resetDraw();
   });
   const select = document.getElementById('revealSelect');
@@ -462,7 +590,10 @@ function renderAngelito(app) {
         <div class="to">Te tocó regalarle a</div>
         <div class="name">${escapeHtml(target.name)}</div>
         ${amountRange ? `<div class="budget">${amountRange}</div>` : ''}
-        ${target.link ? `<a class="giftlink" href="${escapeAttr(target.link)}" target="_blank" rel="noopener">Ver su link de regalo →</a>` : '<p class="note">No dejó un link de regalo.</p>'}
+        ${target.link ? (isRealLink(target.link)
+            ? `<a class="giftlink" href="${escapeAttr(target.link)}" target="_blank" rel="noopener">Ver su link de regalo →</a>`
+            : `<p class="note">Idea de regalo: ${escapeHtml(target.link)}</p>`)
+          : '<p class="note">No dejó ninguna idea de regalo.</p>'}
         <div><button class="btn-ghost" id="hideBtn" style="margin-top:14px;">Ocultar</button></div>
       </div>
     `;
@@ -506,7 +637,7 @@ function renderEndulzar(app) {
   const notifGranted = notifSupported && Notification.permission === 'granted' && notifPref.enabled;
 
   app.innerHTML = `
-    <h1 class="headline">Endulza a tu angelito</h1>
+    <h1 class="headline">Gana aura endulzando</h1>
     <p class="lede">Antes de la revelación, deja detalles anónimos para tu angelito sin que se dé cuenta de quién eres.</p>
     ${bannerHtml}
     ${countdownHtml}
