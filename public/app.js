@@ -110,7 +110,7 @@ let eventCode = null;
 let myId = null;
 let state = {
   eventName: '', currency: 'COP', minAmount: '', maxAmount: '',
-  participants: [], assignments: null, drawnAt: null,
+  participants: [], assignments: null, drawnAt: null, hostId: null,
   sweet: { startDate: '', durationDays: '', intervalDays: '' }
 };
 let notifPref = { enabled: false, lastNotified: '' };
@@ -120,6 +120,27 @@ let sweetIdeaIndex = 0;
 let ideasVisible = false;
 let resultVisible = false;
 let editingSelf = false;
+
+const MY_GROUPS_KEY = 'wishy-mis-grupos';
+function getMyGroups() {
+  try { return JSON.parse(localStorage.getItem(MY_GROUPS_KEY) || '[]'); } catch (e) { return []; }
+}
+function saveMyGroups(list) {
+  localStorage.setItem(MY_GROUPS_KEY, JSON.stringify(list));
+}
+function upsertMyGroup(code, name) {
+  const list = getMyGroups();
+  const idx = list.findIndex(g => g.code === code);
+  const entry = { code, name: name || code };
+  if (idx >= 0) list[idx] = entry; else list.push(entry);
+  saveMyGroups(list);
+}
+function removeMyGroup(code) {
+  saveMyGroups(getMyGroups().filter(g => g.code !== code));
+}
+function isHost() {
+  return !!myId && !!state.hostId && myId === state.hostId;
+}
 
 const SWEET_IDEAS = [
   'Deja un dulce en su puesto o casillero sin dejar rastro.',
@@ -254,11 +275,25 @@ function renderNameScreen() {
 // --- Paso 2: código del grupo (libre, no autogenerado) ---
 function renderCodeScreen() {
   const app = document.getElementById('app');
+  const groups = getMyGroups();
   app.innerHTML = `
     <h1 class="headline">Hola, ${escapeHtml(myName)}</h1>
-    <p class="lede">Escribe el nombre del grupo al que quieres entrar. Si no existe, se crea en ese momento; si ya existe, entras a verlo.</p>
+    <p class="lede">${groups.length ? 'Elige uno de tus grupos, o entra a uno nuevo con su código.' : 'Escribe el nombre del grupo al que quieres entrar. Si no existe, se crea en ese momento.'}</p>
+    ${groups.length ? `
+      <ul class="participant-list" style="margin-bottom:22px;">
+        ${groups.map(g => `
+          <li>
+            <button class="group-pick" data-code="${escapeAttr(g.code)}" style="background:none; border:none; text-align:left; padding:0; flex:1;">
+              <div class="p-name">${escapeHtml(g.name)}</div>
+              <div class="note" style="margin-top:0;">${escapeHtml(g.code)}</div>
+            </button>
+            <button class="p-remove" data-remove="${escapeAttr(g.code)}" title="Quitar de la lista">✕</button>
+          </li>
+        `).join('')}
+      </ul>
+    ` : ''}
     <div class="field">
-      <label for="codeInput">Nombre o código del grupo</label>
+      <label for="codeInput">${groups.length ? 'Entrar a un grupo nuevo' : 'Nombre o código del grupo'}</label>
       <input type="text" id="codeInput" placeholder="ej. familia-perez-2026">
     </div>
     <button class="btn-primary" id="codeGoBtn">Continuar</button>
@@ -269,6 +304,20 @@ function renderCodeScreen() {
       <button class="btn-ghost" id="changeNameBtn2">Cambiar mi nombre</button>
     </div>
   `;
+  document.querySelectorAll('.group-pick').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      eventCode = btn.dataset.code;
+      localStorage.setItem(CODE_KEY, eventCode);
+      await continueIntoEvent();
+    });
+  });
+  document.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      removeMyGroup(btn.dataset.remove);
+      renderCodeScreen();
+    });
+  });
   const input = document.getElementById('codeInput');
   const go = async () => {
     const code = normalizeCode(input.value);
@@ -314,6 +363,10 @@ async function saveState() {
 // --- Paso 3: entrar al grupo (auto-registro si hace falta) ---
 async function continueIntoEvent() {
   await loadEventData();
+  if (!state.hostId && state.participants.length > 0) {
+    state.hostId = state.participants[0].id;
+    saveState();
+  }
   renderCodeBar();
   myId = localStorage.getItem(myIdKey());
   const alreadyIn = myId && state.participants.some(p => p.id === myId);
@@ -322,6 +375,7 @@ async function continueIntoEvent() {
     document.getElementById('bottomNav').style.display = 'none';
     renderJoinSelfScreen();
   } else {
+    upsertMyGroup(eventCode, state.eventName);
     document.getElementById('bottomNav').style.display = 'flex';
     activeTab = state.assignments ? 'resultado' : 'grupo';
     render();
@@ -349,7 +403,9 @@ function renderJoinSelfScreen() {
     if (!name) return;
     await loadEventData(); // refresca antes de guardar, para no pisar a otros que se unieron a la vez
     const id = uid();
+    const becomesHost = state.participants.length === 0;
     state.participants.push({ id, name, link: normalizeGiftNote(wish) });
+    if (becomesHost) state.hostId = id;
     const hadDraw = !!state.assignments;
     state.assignments = null; state.drawnAt = null;
     await saveState();
@@ -357,6 +413,7 @@ function renderJoinSelfScreen() {
     myId = id;
     myName = name;
     localStorage.setItem(NAME_KEY, name);
+    upsertMyGroup(eventCode, state.eventName);
     document.getElementById('bottomNav').style.display = 'flex';
     activeTab = 'grupo';
     render();
@@ -401,6 +458,7 @@ function shuffledDerangement(ids) {
   return null;
 }
 async function doDraw() {
+  if (!isHost()) { alert('Solo quien creó el grupo puede iniciar el sorteo.'); return; }
   await loadEventData();
   const ids = state.participants.map(p => p.id);
   const map = shuffledDerangement(ids);
@@ -412,6 +470,7 @@ async function doDraw() {
   render();
 }
 async function resetDraw() {
+  if (!isHost()) { alert('Solo quien creó el grupo puede rehacer el sorteo.'); return; }
   await loadEventData();
   state.assignments = null; state.drawnAt = null;
   await saveState();
@@ -529,16 +588,24 @@ function renderGrupo(app) {
     </ul>
 
     ${!state.assignments
-      ? `<button class="btn-primary" id="drawBtn" ${state.participants.length < 2 ? 'disabled' : ''}>Realizar el sorteo</button>
-         ${state.participants.length < 2 ? '<p class="note" style="text-align:center;">Se necesitan al menos 2 personas.</p>' : ''}`
-      : `<div class="warn">El sorteo ya se hizo. Ve a la pestaña "Mi resultado".</div>
-         <button class="btn-ghost" id="resetDrawBtn">Rehacer el sorteo (borra el actual para todos)</button>`
+      ? (isHost()
+          ? `<button class="btn-primary" id="drawBtn" ${state.participants.length < 2 ? 'disabled' : ''}>Realizar el sorteo</button>
+             ${state.participants.length < 2 ? '<p class="note" style="text-align:center;">Se necesitan al menos 2 personas.</p>' : ''}`
+          : `<p class="note" style="text-align:center;">Solo quien creó el grupo puede iniciar el sorteo.</p>`)
+      : (isHost()
+          ? `<div class="warn">El sorteo ya se hizo. Ve a la pestaña "Mi resultado".</div>
+             <button class="btn-ghost" id="resetDrawBtn">Rehacer el sorteo (borra el actual para todos)</button>`
+          : `<div class="warn">El sorteo ya se hizo. Ve a la pestaña "Mi resultado".</div>`)
     }
 
     <div class="warn" style="margin-top:16px;">Comparte el código <b>${escapeHtml(eventCode)}</b> — cada quien entra a esta app, escribe ese mismo código, y se agrega con su propio nombre.</div>
   `;
 
-  document.getElementById('eventName').addEventListener('input', e => { state.eventName = e.target.value; saveState(); });
+  document.getElementById('eventName').addEventListener('input', e => {
+    state.eventName = e.target.value;
+    saveState();
+    upsertMyGroup(eventCode, state.eventName);
+  });
   document.getElementById('minAmount').addEventListener('input', e => { state.minAmount = e.target.value; saveState(); });
   document.getElementById('maxAmount').addEventListener('input', e => { state.maxAmount = e.target.value; saveState(); });
   document.getElementById('currency').addEventListener('change', e => { state.currency = e.target.value; saveState(); });
@@ -568,9 +635,11 @@ function renderResultado(app) {
     app.innerHTML = `
       <h1 class="headline">Mi resultado</h1>
       <p class="lede">Todavía no se ha hecho el sorteo.</p>
-      ${state.participants.length >= 2
-        ? `<button class="btn-primary" id="drawBtn2">Realizar el sorteo</button>`
-        : `<p class="note">Se necesitan al menos 2 personas en el grupo.</p>`}
+      ${isHost()
+        ? (state.participants.length >= 2
+            ? `<button class="btn-primary" id="drawBtn2">Realizar el sorteo</button>`
+            : `<p class="note">Se necesitan al menos 2 personas en el grupo.</p>`)
+        : `<p class="note">Solo quien creó el grupo puede iniciar el sorteo.</p>`}
     `;
     const drawBtn = document.getElementById('drawBtn2');
     if (drawBtn) drawBtn.addEventListener('click', doDraw);
