@@ -100,34 +100,26 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-// --- App Wishy (misma logica que la version de Claude, ahora contra el servidor) ---
-const CODE_KEY = 'codigo-actual';
-const THEME_KEY = 'tema-preferido';
+// --- App Wishy ---
+const NAME_KEY = 'wishy-mi-nombre';
+const CODE_KEY = 'wishy-codigo-actual';
+const THEME_KEY = 'wishy-tema-preferido';
 
+let myName = null;
 let eventCode = null;
+let myId = null;
 let state = {
   eventName: '', currency: 'COP', minAmount: '', maxAmount: '',
   participants: [], assignments: null, drawnAt: null,
-  organizerPin: null,
   sweet: { startDate: '', durationDays: '', intervalDays: '' }
 };
 let notifPref = { enabled: false, lastNotified: '' };
-let revealedFor = null;
 let loaded = false;
-let activeTab = 'amigos';
+let activeTab = 'grupo';
 let sweetIdeaIndex = 0;
-let organizerUnlocked = false;
-let editingId = null;
-
-function checkOrganizerAccess() {
-  if (!state.organizerPin) return true;
-  if (organizerUnlocked) return true;
-  const attempt = prompt('Ingresa el PIN del organizador:');
-  if (attempt === null) return false;
-  if (attempt === state.organizerPin) { organizerUnlocked = true; return true; }
-  alert('PIN incorrecto.');
-  return false;
-}
+let ideasVisible = false;
+let resultVisible = false;
+let editingSelf = false;
 
 const SWEET_IDEAS = [
   'Deja un dulce en su puesto o casillero sin dejar rastro.',
@@ -160,15 +152,42 @@ function daysBetween(fromStr, toStr) {
   return Math.round((b - a) / 86400000);
 }
 function genCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
   let s = '';
-  for (let i = 0; i < 5; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return s;
 }
+function normalizeCode(raw) {
+  return (raw || '').trim().toLowerCase().replace(/\s+/g, '-');
+}
 function eventKey() { return 'evento-' + eventCode; }
+function myIdKey() { return 'wishy-my-id-' + eventCode; }
+
+function looksLikeUrl(text) {
+  const t = text.trim();
+  if (/\s/.test(t)) return false;
+  return /^(https?:\/\/)?[\w-]+(\.[\w-]+)+(\/\S*)?$/i.test(t);
+}
+function normalizeGiftNote(raw) {
+  const t = (raw || '').trim();
+  if (!t) return '';
+  if (/^https?:\/\//i.test(t)) return t;
+  if (looksLikeUrl(t)) return 'https://' + t;
+  return t;
+}
+function isRealLink(text) {
+  return !!text && /^https?:\/\//i.test(text);
+}
 
 const ICON_SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>';
 const ICON_MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/></svg>';
+
+function hideSplash() {
+  const s = document.getElementById('splash');
+  if (!s) return;
+  s.classList.add('hide');
+  setTimeout(() => s.remove(), 500);
+}
 
 async function init() {
   let theme = 'light';
@@ -176,19 +195,96 @@ async function init() {
   theme = savedTheme || (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   applyTheme(theme, false);
 
-  eventCode = localStorage.getItem(CODE_KEY) || null;
-
   loaded = true;
-  if (eventCode) {
-    await loadEventData();
-    renderCodeBar();
-    document.getElementById('bottomNav').style.display = 'flex';
-    if (state.assignments) activeTab = 'angelito';
-    render();
-  } else {
+  myName = localStorage.getItem(NAME_KEY);
+
+  if (!myName) {
     document.getElementById('bottomNav').style.display = 'none';
-    renderJoinScreen();
+    renderNameScreen();
+  } else {
+    eventCode = localStorage.getItem(CODE_KEY);
+    if (!eventCode) {
+      document.getElementById('bottomNav').style.display = 'none';
+      renderCodeScreen();
+    } else {
+      await continueIntoEvent();
+    }
   }
+
+  setTimeout(hideSplash, 700);
+}
+
+function applyTheme(theme, persist) {
+  document.body.setAttribute('data-theme', theme);
+  document.getElementById('themeToggle').innerHTML = theme === 'dark' ? ICON_SUN : ICON_MOON;
+  if (persist) localStorage.setItem(THEME_KEY, theme);
+}
+document.getElementById('themeToggle').addEventListener('click', () => {
+  const current = document.body.getAttribute('data-theme') || 'light';
+  applyTheme(current === 'dark' ? 'light' : 'dark', true);
+});
+
+// --- Paso 1: nombre propio ---
+function renderNameScreen() {
+  const app = document.getElementById('app');
+  document.getElementById('codeBar').innerHTML = '';
+  app.innerHTML = `
+    <h1 class="headline">¿Cómo te llamas?</h1>
+    <p class="lede">Wishy funciona como tu cuenta propia en este celular: primero tu nombre, luego el grupo al que quieras entrar.</p>
+    <div class="field">
+      <label for="myNameInput">Tu nombre</label>
+      <input type="text" id="myNameInput" placeholder="Nombre o apodo">
+    </div>
+    <button class="btn-primary" id="saveNameBtn">Continuar</button>
+  `;
+  const input = document.getElementById('myNameInput');
+  const go = () => {
+    const v = input.value.trim();
+    if (!v) return;
+    myName = v;
+    localStorage.setItem(NAME_KEY, v);
+    eventCode = localStorage.getItem(CODE_KEY);
+    if (!eventCode) renderCodeScreen();
+    else continueIntoEvent();
+  };
+  document.getElementById('saveNameBtn').addEventListener('click', go);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+}
+
+// --- Paso 2: código del grupo (libre, no autogenerado) ---
+function renderCodeScreen() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <h1 class="headline">Hola, ${escapeHtml(myName)}</h1>
+    <p class="lede">Escribe el nombre del grupo al que quieres entrar. Si no existe, se crea en ese momento; si ya existe, entras a verlo.</p>
+    <div class="field">
+      <label for="codeInput">Nombre o código del grupo</label>
+      <input type="text" id="codeInput" placeholder="ej. familia-perez-2026">
+    </div>
+    <button class="btn-primary" id="codeGoBtn">Continuar</button>
+    <div style="text-align:center; margin-top:14px;">
+      <button class="btn-ghost" id="randomCodeBtn">Generar uno al azar</button>
+    </div>
+    <div style="text-align:center; margin-top:6px;">
+      <button class="btn-ghost" id="changeNameBtn2">Cambiar mi nombre</button>
+    </div>
+  `;
+  const input = document.getElementById('codeInput');
+  const go = async () => {
+    const code = normalizeCode(input.value);
+    if (!code) return;
+    eventCode = code;
+    localStorage.setItem(CODE_KEY, code);
+    await continueIntoEvent();
+  };
+  document.getElementById('codeGoBtn').addEventListener('click', go);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+  document.getElementById('randomCodeBtn').addEventListener('click', () => { input.value = genCode(); });
+  document.getElementById('changeNameBtn2').addEventListener('click', () => {
+    localStorage.removeItem(NAME_KEY);
+    myName = null;
+    renderNameScreen();
+  });
 }
 
 async function loadEventData() {
@@ -202,77 +298,12 @@ async function loadEventData() {
     if (res && res.value) state = Object.assign(state, JSON.parse(res.value));
     if (!state.sweet) state.sweet = { startDate: '', durationDays: '', intervalDays: '' };
   } catch (e) {}
-  const npRaw = localStorage.getItem('notif-' + eventCode);
+  const npRaw = localStorage.getItem('wishy-notif-' + eventCode);
   notifPref = npRaw ? JSON.parse(npRaw) : { enabled: false, lastNotified: '' };
 }
 function saveNotifPref() {
-  localStorage.setItem('notif-' + eventCode, JSON.stringify(notifPref));
+  localStorage.setItem('wishy-notif-' + eventCode, JSON.stringify(notifPref));
 }
-
-async function joinEvent(code) {
-  code = (code || '').trim().toUpperCase();
-  if (!code) return;
-  eventCode = code;
-  localStorage.setItem(CODE_KEY, code);
-  organizerUnlocked = false;
-  await loadEventData();
-  renderCodeBar();
-  document.getElementById('bottomNav').style.display = 'flex';
-  activeTab = state.assignments ? 'angelito' : 'amigos';
-  render();
-}
-
-function leaveEvent() {
-  eventCode = null;
-  localStorage.removeItem(CODE_KEY);
-  document.getElementById('bottomNav').style.display = 'none';
-  document.getElementById('codeBar').innerHTML = '';
-  renderJoinScreen();
-}
-
-function renderJoinScreen() {
-  const app = document.getElementById('app');
-  app.innerHTML = `
-    <h1 class="headline">Bienvenido a Wishy</h1>
-    <p class="lede">Crea un grupo nuevo o entra con el código que te compartieron para ver el mismo sorteo, la misma lista y los mismos recordatorios.</p>
-    <div class="join-wrap">
-      <button class="btn-primary" id="createBtn">Crear un grupo nuevo</button>
-      <div class="or-sep">o</div>
-      <div class="field" style="margin-bottom:8px;">
-        <label for="joinCodeInput">Código del grupo</label>
-        <input type="text" id="joinCodeInput" class="join-code-input" maxlength="8" placeholder="AB3F9">
-      </div>
-      <button class="btn-secondary" id="joinBtn">Entrar con este código</button>
-    </div>
-  `;
-  document.getElementById('createBtn').addEventListener('click', () => joinEvent(genCode()));
-  const input = document.getElementById('joinCodeInput');
-  document.getElementById('joinBtn').addEventListener('click', () => joinEvent(input.value));
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); joinEvent(input.value); } });
-}
-
-function renderCodeBar() {
-  document.getElementById('codeBar').innerHTML = `
-    <div class="code-bar">
-      <span>Código del grupo: <b>${escapeHtml(eventCode)}</b></span>
-      <button id="leaveBtn">Cambiar</button>
-    </div>
-  `;
-  document.getElementById('leaveBtn').addEventListener('click', () => {
-    if (confirm('Vas a salir de este grupo en este dispositivo (el evento no se borra). ¿Continuar?')) leaveEvent();
-  });
-}
-
-function applyTheme(theme, persist) {
-  document.body.setAttribute('data-theme', theme);
-  document.getElementById('themeToggle').innerHTML = theme === 'dark' ? ICON_SUN : ICON_MOON;
-  if (persist) localStorage.setItem(THEME_KEY, theme);
-}
-document.getElementById('themeToggle').addEventListener('click', () => {
-  const current = document.body.getAttribute('data-theme') || 'light';
-  applyTheme(current === 'dark' ? 'light' : 'dark', true);
-});
-
 async function saveState() {
   try {
     const result = await storage.set(eventKey(), JSON.stringify(state), true);
@@ -280,46 +311,79 @@ async function saveState() {
   } catch (e) { console.error('Error guardando', e); }
 }
 
-function looksLikeUrl(text) {
-  const t = text.trim();
-  if (/\s/.test(t)) return false;
-  return /^(https?:\/\/)?[\w-]+(\.[\w-]+)+(\/\S*)?$/i.test(t);
-}
-function normalizeGiftNote(raw) {
-  const t = (raw || '').trim();
-  if (!t) return '';
-  if (/^https?:\/\//i.test(t)) return t;
-  if (looksLikeUrl(t)) return 'https://' + t;
-  return t; // texto libre: se guarda tal cual, sin convertirlo en link
-}
-function isRealLink(text) {
-  return !!text && /^https?:\/\//i.test(text);
+// --- Paso 3: entrar al grupo (auto-registro si hace falta) ---
+async function continueIntoEvent() {
+  await loadEventData();
+  renderCodeBar();
+  myId = localStorage.getItem(myIdKey());
+  const alreadyIn = myId && state.participants.some(p => p.id === myId);
+  if (!alreadyIn) {
+    myId = null;
+    document.getElementById('bottomNav').style.display = 'none';
+    renderJoinSelfScreen();
+  } else {
+    document.getElementById('bottomNav').style.display = 'flex';
+    activeTab = state.assignments ? 'resultado' : 'grupo';
+    render();
+  }
 }
 
-function addParticipant(name, link) {
-  name = (name || '').trim();
-  if (!name) return;
-  const note = normalizeGiftNote(link);
-  state.participants.push({ id: uid(), name, link: note });
-  state.assignments = null; state.drawnAt = null;
-  saveState(); render();
+function renderJoinSelfScreen() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <h1 class="headline">Únete al grupo</h1>
+    <p class="lede">${state.eventName ? escapeHtml(state.eventName) + ' — ' : ''}Agrégate con tu nombre y, si quieres, una idea de regalo. Nadie más va a ver tu deseo hasta que le toque regalarte a ti.</p>
+    <div class="field">
+      <label for="joinNameInput">Tu nombre</label>
+      <input type="text" id="joinNameInput" value="${escapeAttr(myName)}">
+    </div>
+    <div class="field">
+      <label for="joinWishInput">Tu deseo (opcional)</label>
+      <input type="text" id="joinWishInput" placeholder="Link, talla, idea puntual...">
+    </div>
+    <button class="btn-primary" id="joinBtn">Unirme al grupo</button>
+  `;
+  document.getElementById('joinBtn').addEventListener('click', async () => {
+    const name = document.getElementById('joinNameInput').value.trim();
+    const wish = document.getElementById('joinWishInput').value;
+    if (!name) return;
+    await loadEventData(); // refresca antes de guardar, para no pisar a otros que se unieron a la vez
+    const id = uid();
+    state.participants.push({ id, name, link: normalizeGiftNote(wish) });
+    const hadDraw = !!state.assignments;
+    state.assignments = null; state.drawnAt = null;
+    await saveState();
+    localStorage.setItem(myIdKey(), id);
+    myId = id;
+    myName = name;
+    localStorage.setItem(NAME_KEY, name);
+    document.getElementById('bottomNav').style.display = 'flex';
+    activeTab = 'grupo';
+    render();
+    if (hadDraw) {
+      setTimeout(() => alert('El sorteo ya se había hecho, pero como te uniste ahora hay que rehacerlo para incluirte.'), 200);
+    }
+  });
 }
-function editParticipant(id, name, link) {
-  name = (name || '').trim();
-  if (!name) return;
-  const note = normalizeGiftNote(link);
-  const p = state.participants.find(p => p.id === id);
-  if (!p) return;
-  p.name = name;
-  p.link = note;
-  editingId = null;
-  saveState(); render();
+
+function renderCodeBar() {
+  document.getElementById('codeBar').innerHTML = `
+    <div class="code-bar">
+      <span>${escapeHtml(myName)} · Grupo: <b>${escapeHtml(eventCode)}</b></span>
+      <button id="leaveBtn">Cambiar</button>
+    </div>
+  `;
+  document.getElementById('leaveBtn').addEventListener('click', () => {
+    if (confirm('Vas a salir de este grupo en este dispositivo (tu lugar en el grupo no se borra). ¿Continuar?')) {
+      eventCode = null;
+      localStorage.removeItem(CODE_KEY);
+      document.getElementById('bottomNav').style.display = 'none';
+      document.getElementById('codeBar').innerHTML = '';
+      renderCodeScreen();
+    }
+  });
 }
-function removeParticipant(id) {
-  state.participants = state.participants.filter(p => p.id !== id);
-  state.assignments = null; state.drawnAt = null;
-  saveState(); render();
-}
+
 function shuffledDerangement(ids) {
   if (ids.length < 2) return null;
   let attempt = 0;
@@ -336,20 +400,47 @@ function shuffledDerangement(ids) {
   }
   return null;
 }
-function doDraw() {
+async function doDraw() {
+  await loadEventData();
   const ids = state.participants.map(p => p.id);
   const map = shuffledDerangement(ids);
-  if (!map) { alert('Agrega al menos 2 personas para sortear.'); return; }
-  state.assignments = map; state.drawnAt = Date.now(); revealedFor = null;
-  saveState(); render();
+  if (!map) { alert('Se necesitan al menos 2 personas para sortear.'); return; }
+  state.assignments = map; state.drawnAt = Date.now();
+  await saveState();
+  resultVisible = false;
+  activeTab = 'resultado';
+  render();
 }
-function resetDraw() {
-  state.assignments = null; state.drawnAt = null; revealedFor = null;
-  saveState(); render();
+async function resetDraw() {
+  await loadEventData();
+  state.assignments = null; state.drawnAt = null;
+  await saveState();
+  resultVisible = false;
+  render();
 }
-function editList() {
-  state.assignments = null; state.drawnAt = null; revealedFor = null;
-  saveState(); render();
+async function editSelf(name, link) {
+  name = (name || '').trim();
+  if (!name) return;
+  await loadEventData();
+  const p = state.participants.find(p => p.id === myId);
+  if (!p) { render(); return; }
+  p.name = name;
+  p.link = normalizeGiftNote(link);
+  myName = name;
+  localStorage.setItem(NAME_KEY, name);
+  editingSelf = false;
+  await saveState();
+  render();
+}
+async function leaveGroupEntry() {
+  await loadEventData();
+  state.participants = state.participants.filter(p => p.id !== myId);
+  state.assignments = null; state.drawnAt = null;
+  await saveState();
+  localStorage.removeItem(myIdKey());
+  myId = null;
+  document.getElementById('bottomNav').style.display = 'none';
+  renderJoinSelfScreen();
 }
 
 function getSchedule() {
@@ -367,12 +458,12 @@ function getSchedule() {
 function render() {
   const app = document.getElementById('app');
   const nav = document.getElementById('bottomNav');
-  if (!loaded || !eventCode) return;
+  if (!loaded || !eventCode || !myId) return;
   nav.querySelectorAll('.nav-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === activeTab);
   });
-  if (activeTab === 'amigos') renderAmigos(app);
-  else if (activeTab === 'angelito') renderAngelito(app);
+  if (activeTab === 'grupo') renderGrupo(app);
+  else if (activeTab === 'resultado') renderResultado(app);
   else renderEndulzar(app);
 }
 
@@ -380,32 +471,15 @@ document.getElementById('bottomNav').addEventListener('click', (e) => {
   const btn = e.target.closest('.nav-btn');
   if (!btn) return;
   activeTab = btn.dataset.tab;
+  editingSelf = false;
   render();
 });
 
-function renderAmigos(app) {
-  if (state.organizerPin && !organizerUnlocked) {
-    app.innerHTML = `
-      <h1 class="headline">Sección protegida</h1>
-      <p class="lede">Solo el organizador puede ver y editar la lista. Ingresa el PIN para continuar.</p>
-      <div class="field">
-        <label for="organizerPinInput">PIN del organizador</label>
-        <input type="text" id="organizerPinInput" placeholder="••••" inputmode="numeric">
-      </div>
-      <button class="btn-primary" id="unlockBtn">Desbloquear</button>
-    `;
-    const pinInput = document.getElementById('organizerPinInput');
-    document.getElementById('unlockBtn').addEventListener('click', () => {
-      if (pinInput.value === state.organizerPin) { organizerUnlocked = true; render(); }
-      else alert('PIN incorrecto.');
-    });
-    pinInput.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('unlockBtn').click(); });
-    return;
-  }
-
+function renderGrupo(app) {
+  const me = state.participants.find(p => p.id === myId);
   app.innerHTML = `
-    <h1 class="headline">Arma el grupo</h1>
-    <p class="lede">Agrega a los participantes, define el monto y cuando estén todos, ve a "Sorteo".</p>
+    <h1 class="headline">Grupo</h1>
+    <p class="lede">Cada quien se agrega con su propio nombre y deseo. Nadie ve el deseo de otro hasta que le toque regalarle.</p>
     <div class="card">
       <div class="field">
         <label for="eventName">Nombre del evento</label>
@@ -429,163 +503,93 @@ function renderAmigos(app) {
       </div>
     </div>
 
-    <div class="card">
-      <label>Proteger la lista con un PIN</label>
-      ${state.organizerPin
-        ? `<p class="note" style="margin-top:0;">Protección activada.</p>
-           <button class="btn-secondary" id="changePinBtn">Cambiar o quitar PIN</button>`
-        : `<div class="row">
-             <div class="field" style="margin-bottom:0;">
-               <input type="text" id="newOrgPin" placeholder="Crea un PIN, ej. 4321" inputmode="numeric">
-             </div>
-             <button class="btn-add" id="setPinBtn">Activar</button>
-           </div>
-           <p class="note">Sin esto, cualquiera con el código puede editar la lista o rehacer el sorteo.</p>`
-      }
-    </div>
+    <h1 class="headline" style="font-size:1.15rem;">Participantes (${state.participants.length})</h1>
+    <p class="lede" style="margin-bottom:14px;">Solo se ven los nombres — los deseos son privados.</p>
+    <ul class="participant-list">
+      ${state.participants.map(p => p.id === myId ? (editingSelf ? `
+        <li style="flex-direction:column; align-items:stretch; gap:8px;">
+          <input type="text" id="selfEditName" value="${escapeAttr(p.name)}" placeholder="Tu nombre">
+          <input type="text" id="selfEditWish" value="${escapeAttr(p.link)}" placeholder="Tu deseo (opcional)">
+          <div class="row">
+            <button class="btn-add" id="saveSelfEdit">Guardar</button>
+            <button class="btn-secondary" id="cancelSelfEdit">Cancelar</button>
+          </div>
+        </li>
+      ` : `
+        <li>
+          <div class="p-name">${escapeHtml(p.name)} <span class="note" style="display:inline;">(tú)</span></div>
+          <div style="display:flex; gap:4px;">
+            <button class="p-remove" id="editSelfBtn" title="Editar">✎</button>
+            <button class="p-remove" id="leaveSelfBtn" title="Salir">✕</button>
+          </div>
+        </li>
+      `) : `
+        <li><div class="p-name">${escapeHtml(p.name)}</div></li>
+      `).join('')}
+    </ul>
 
-    <h1 class="headline" style="font-size:1.15rem;">Participantes</h1>
-    <p class="lede" style="margin-bottom:14px;">En "regalo" puedes poner un link, o algo puntual como talla, color o una idea — no tiene que ser una URL.</p>
-    <div class="add-row">
-      <div class="field">
-        <label for="newName">Nombre</label>
-        <input type="text" id="newName" placeholder="Nombre">
-      </div>
-      <button class="btn-add" id="addBtn">+</button>
-    </div>
-    <div class="field" style="margin-top:-10px;">
-      <input type="text" id="newLink" placeholder="Link o idea de regalo (opcional)">
-    </div>
-    ${state.participants.length === 0
-      ? '<p class="empty">Aún no hay participantes.</p>'
-      : `<ul class="participant-list">
-          ${state.participants.map(p => editingId === p.id ? `
-            <li style="flex-direction:column; align-items:stretch; gap:8px;">
-              <input type="text" class="edit-name" data-id="${p.id}" value="${escapeAttr(p.name)}" placeholder="Nombre">
-              <input type="text" class="edit-link" data-id="${p.id}" value="${escapeAttr(p.link)}" placeholder="Link o idea de regalo">
-              <div class="row">
-                <button class="btn-add save-edit" data-id="${p.id}">Guardar</button>
-                <button class="btn-secondary cancel-edit">Cancelar</button>
-              </div>
-            </li>
-          ` : `
-            <li>
-              <div>
-                <div class="p-name">${escapeHtml(p.name)}</div>
-                ${p.link ? (isRealLink(p.link)
-                    ? `<a class="p-link" href="${escapeAttr(p.link)}" target="_blank" rel="noopener">${escapeHtml(p.link)}</a>`
-                    : `<div class="note" style="margin-top:2px;">${escapeHtml(p.link)}</div>`)
-                  : ''}
-              </div>
-              <div style="display:flex; gap:4px;">
-                <button class="p-remove edit-btn" data-id="${p.id}" aria-label="Editar" title="Editar">✎</button>
-                <button class="p-remove" data-id="${p.id}" aria-label="Quitar">✕</button>
-              </div>
-            </li>`).join('')}
-        </ul>`
+    ${!state.assignments
+      ? `<button class="btn-primary" id="drawBtn" ${state.participants.length < 2 ? 'disabled' : ''}>Realizar el sorteo</button>
+         ${state.participants.length < 2 ? '<p class="note" style="text-align:center;">Se necesitan al menos 2 personas.</p>' : ''}`
+      : `<div class="warn">El sorteo ya se hizo. Ve a la pestaña "Mi resultado".</div>
+         <button class="btn-ghost" id="resetDrawBtn">Rehacer el sorteo (borra el actual para todos)</button>`
     }
-    <div class="warn">Comparte el código <b>${escapeHtml(eventCode)}</b> y el enlace de esta app con el grupo — quien entre con ese código ve esta misma lista, el sorteo y los recordatorios.</div>
+
+    <div class="warn" style="margin-top:16px;">Comparte el código <b>${escapeHtml(eventCode)}</b> — cada quien entra a esta app, escribe ese mismo código, y se agrega con su propio nombre.</div>
   `;
+
   document.getElementById('eventName').addEventListener('input', e => { state.eventName = e.target.value; saveState(); });
   document.getElementById('minAmount').addEventListener('input', e => { state.minAmount = e.target.value; saveState(); });
   document.getElementById('maxAmount').addEventListener('input', e => { state.maxAmount = e.target.value; saveState(); });
   document.getElementById('currency').addEventListener('change', e => { state.currency = e.target.value; saveState(); });
 
-  const setPinBtn = document.getElementById('setPinBtn');
-  if (setPinBtn) {
-    setPinBtn.addEventListener('click', () => {
-      const v = document.getElementById('newOrgPin').value.trim();
-      if (!v) return;
-      state.organizerPin = v;
-      organizerUnlocked = true;
-      saveState(); render();
-    });
-  }
-  const changePinBtn = document.getElementById('changePinBtn');
-  if (changePinBtn) {
-    changePinBtn.addEventListener('click', () => {
-      const v = prompt('Escribe el nuevo PIN (deja vacío para quitar la protección):', '');
-      if (v === null) return;
-      state.organizerPin = v.trim() ? v.trim() : null;
-      saveState(); render();
-    });
-  }
-
-  const nameInput = document.getElementById('newName');
-  const linkInput = document.getElementById('newLink');
-  document.getElementById('addBtn').addEventListener('click', () => addParticipant(nameInput.value, linkInput.value));
-  [nameInput, linkInput].forEach(inp => {
-    inp.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); addParticipant(nameInput.value, linkInput.value); }
-    });
+  const editBtn = document.getElementById('editSelfBtn');
+  if (editBtn) editBtn.addEventListener('click', () => { editingSelf = true; render(); });
+  const cancelBtn = document.getElementById('cancelSelfEdit');
+  if (cancelBtn) cancelBtn.addEventListener('click', () => { editingSelf = false; render(); });
+  const saveBtn = document.getElementById('saveSelfEdit');
+  if (saveBtn) saveBtn.addEventListener('click', () => {
+    editSelf(document.getElementById('selfEditName').value, document.getElementById('selfEditWish').value);
   });
-  document.querySelectorAll('.p-remove[aria-label="Quitar"]').forEach(btn => {
-    btn.addEventListener('click', () => removeParticipant(btn.dataset.id));
+  const leaveBtn = document.getElementById('leaveSelfBtn');
+  if (leaveBtn) leaveBtn.addEventListener('click', () => {
+    if (confirm('¿Salir del grupo? Se borra tu nombre y tu deseo de esta lista.')) leaveGroupEntry();
   });
-  document.querySelectorAll('.edit-btn').forEach(btn => {
-    btn.addEventListener('click', () => { editingId = btn.dataset.id; render(); });
-  });
-  document.querySelectorAll('.cancel-edit').forEach(btn => {
-    btn.addEventListener('click', () => { editingId = null; render(); });
-  });
-  document.querySelectorAll('.save-edit').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.id;
-      const nameVal = document.querySelector(`.edit-name[data-id="${id}"]`).value;
-      const linkVal = document.querySelector(`.edit-link[data-id="${id}"]`).value;
-      editParticipant(id, nameVal, linkVal);
-    });
+  const drawBtn = document.getElementById('drawBtn');
+  if (drawBtn) drawBtn.addEventListener('click', doDraw);
+  const resetBtn = document.getElementById('resetDrawBtn');
+  if (resetBtn) resetBtn.addEventListener('click', () => {
+    if (confirm('Esto borra el sorteo actual para todos. ¿Continuar?')) resetDraw();
   });
 }
 
-function renderAngelito(app) {
+function renderResultado(app) {
   if (!state.assignments) {
     app.innerHTML = `
-      <h1 class="headline">Listos para sortear</h1>
-      <p class="lede">${state.participants.length < 2
-        ? 'Agrega al menos 2 personas en la pestaña "Amigos" para poder sortear.'
-        : `Hay ${state.participants.length} participantes. Cuando todos estén en la lista, dale al botón.`}</p>
-      <button class="btn-primary" id="drawBtn" ${state.participants.length < 2 ? 'disabled' : ''}>Realizar el sorteo</button>
+      <h1 class="headline">Mi resultado</h1>
+      <p class="lede">Todavía no se ha hecho el sorteo.</p>
+      ${state.participants.length >= 2
+        ? `<button class="btn-primary" id="drawBtn2">Realizar el sorteo</button>`
+        : `<p class="note">Se necesitan al menos 2 personas en el grupo.</p>`}
     `;
-    const drawBtn = document.getElementById('drawBtn');
+    const drawBtn = document.getElementById('drawBtn2');
     if (drawBtn) drawBtn.addEventListener('click', doDraw);
     return;
   }
+
   const byId = {};
   state.participants.forEach(p => byId[p.id] = p);
+  const target = byId[state.assignments[myId]];
   const amountRange = (state.minAmount || state.maxAmount)
     ? `Monto sugerido: ${state.minAmount ? fmtAmount(state.minAmount) : '—'} a ${state.maxAmount ? fmtAmount(state.maxAmount) : '—'} ${state.currency}`
     : '';
+
   app.innerHTML = `
-    <h1 class="headline">${state.eventName ? escapeHtml(state.eventName) : 'Tu sorteo'}</h1>
-    ${amountRange ? `<p class="lede" style="margin-bottom:16px;">${amountRange}</p>` : '<div style="height:6px;"></div>'}
-    <label for="revealSelect">¿Quién eres?</label>
-    <select id="revealSelect">
-      <option value="">Selecciona tu nombre</option>
-      ${state.participants.map(p => `<option value="${p.id}" ${revealedFor === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}
-    </select>
-    <div id="revealArea"></div>
-    <div style="margin-top:22px;">
-      <button class="btn-ghost" id="editListBtn">Editar lista de participantes</button><br>
-      <button class="btn-ghost" id="resetDrawBtn">Repetir el sorteo</button>
-    </div>
-  `;
-  document.getElementById('editListBtn').addEventListener('click', () => {
-    if (checkOrganizerAccess()) editList();
-  });
-  document.getElementById('resetDrawBtn').addEventListener('click', () => {
-    if (!checkOrganizerAccess()) return;
-    if (confirm('Esto borra el sorteo actual para todos. ¿Continuar?')) resetDraw();
-  });
-  const select = document.getElementById('revealSelect');
-  select.addEventListener('change', () => { revealedFor = select.value || null; renderRevealArea(); });
-  renderRevealArea();
-  function renderRevealArea() {
-    const area = document.getElementById('revealArea');
-    if (!revealedFor) { area.innerHTML = ''; return; }
-    const target = byId[state.assignments[revealedFor]];
-    if (!target) { area.innerHTML = '<p class="empty">No se encontró tu asignación.</p>'; return; }
-    area.innerHTML = `
+    <h1 class="headline">Mi resultado</h1>
+    <p class="lede">Solo tú puedes ver esto en tu celular.</p>
+    ${!target ? '<p class="empty">No se encontró tu asignación.</p>' : (!resultVisible ? `
+      <button class="btn-primary" id="showResultBtn">Ver mi resultado</button>
+    ` : `
       <div class="reveal-card">
         <div class="to">Te tocó regalarle a</div>
         <div class="name">${escapeHtml(target.name)}</div>
@@ -594,13 +598,14 @@ function renderAngelito(app) {
             ? `<a class="giftlink" href="${escapeAttr(target.link)}" target="_blank" rel="noopener">Ver su link de regalo →</a>`
             : `<p class="note">Idea de regalo: ${escapeHtml(target.link)}</p>`)
           : '<p class="note">No dejó ninguna idea de regalo.</p>'}
-        <div><button class="btn-ghost" id="hideBtn" style="margin-top:14px;">Ocultar</button></div>
+        <div><button class="btn-ghost" id="hideResultBtn" style="margin-top:14px;">Ocultar</button></div>
       </div>
-    `;
-    document.getElementById('hideBtn').addEventListener('click', () => {
-      revealedFor = null; select.value = ''; renderRevealArea();
-    });
-  }
+    `)}
+  `;
+  const showBtn = document.getElementById('showResultBtn');
+  if (showBtn) showBtn.addEventListener('click', () => { resultVisible = true; render(); });
+  const hideBtn = document.getElementById('hideResultBtn');
+  if (hideBtn) hideBtn.addEventListener('click', () => { resultVisible = false; render(); });
 }
 
 function renderEndulzar(app) {
@@ -613,7 +618,7 @@ function renderEndulzar(app) {
     const isSweetenDay = sched.sweetenDates.includes(today);
     const isRevealDay = today === sched.revealDate;
     if (isRevealDay) bannerHtml = `<div class="sweet-banner">🎁 ¡Hoy es la revelación final!</div>`;
-    else if (isSweetenDay) bannerHtml = `<div class="sweet-banner">🍬 ¡Hoy toca endulzar a tu angelito!</div>`;
+    else if (isSweetenDay) bannerHtml = `<div class="sweet-banner">🍬 ¡Hoy toca endulzar!</div>`;
 
     const daysToReveal = daysBetween(today, sched.revealDate);
     const nextSweeten = sched.sweetenDates.find(d => d >= today);
@@ -638,13 +643,18 @@ function renderEndulzar(app) {
 
   app.innerHTML = `
     <h1 class="headline">Gana aura endulzando</h1>
-    <p class="lede">Antes de la revelación, deja detalles anónimos para tu angelito sin que se dé cuenta de quién eres.</p>
+    <p class="lede">Antes de la revelación, deja detalles para tu Wishy sin que se dé cuenta de quién eres.</p>
     ${bannerHtml}
     ${countdownHtml}
+
     <div class="sweet-card">
-      <div class="idea">"${idea}"</div>
-      <button class="btn-secondary" id="anotherIdea">Otra idea</button>
+      <button class="btn-secondary" id="toggleIdeas">${ideasVisible ? 'Ocultar ideas' : 'Mostrar ideas'}</button>
+      ${ideasVisible ? `
+        <div class="idea">"${idea}"</div>
+        <button class="btn-secondary" id="anotherIdea">Otra idea</button>
+      ` : ''}
     </div>
+
     <div class="card">
       <label>¿Cuánto dura el amigo secreto?</label>
       <div class="row">
@@ -663,6 +673,7 @@ function renderEndulzar(app) {
       </div>
       <p class="note">${sched ? `Del ${sched.startDate} al ${sched.revealDate}, cada ${sched.interval} días. Esto queda visible para todo el grupo.` : 'Completa la fecha de inicio y la duración para calcular el calendario.'}</p>
     </div>
+
     <div class="card">
       <div class="notif-row">
         <div>
@@ -674,7 +685,9 @@ function renderEndulzar(app) {
     </div>
   `;
 
-  document.getElementById('anotherIdea').addEventListener('click', () => {
+  document.getElementById('toggleIdeas').addEventListener('click', () => { ideasVisible = !ideasVisible; renderEndulzar(app); });
+  const anotherBtn = document.getElementById('anotherIdea');
+  if (anotherBtn) anotherBtn.addEventListener('click', () => {
     sweetIdeaIndex = Math.floor(Math.random() * SWEET_IDEAS.length);
     renderEndulzar(app);
   });
